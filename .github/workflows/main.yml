@@ -1,18 +1,62 @@
-name: Test notification
+name: Restaurant Watch
 
 on:
   workflow_dispatch:
+  schedule:
+    - cron: "*/5 * * * *"
 
 jobs:
-  test:
+  check:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
+
     steps:
-      - name: Send test notification
+      - uses: actions/checkout@v4
+
+      - name: Prepare state
+        run: mkdir -p .rw-state
+
+      - name: Restore last status
+        uses: actions/cache@v4
+        with:
+          path: .rw-state
+          key: rw-state-${{ github.run_id }}
+          restore-keys: |
+            rw-state-
+
+      - name: Build monitor
+        run: docker build -t restaurant-watch .
+
+      - name: Check 大班樓 and 步雲
         env:
           NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
         run: |
-          curl -fsS \
-            -H "Title: Restaurant Watch" \
-            -H "Priority: high" \
-            -d "Restaurant Watch 測試成功 ✅" \
-            "https://ntfy.sh/${NTFY_TOPIC}"
+          docker run --rm -i \
+            -e NTFY_TOPIC="$NTFY_TOPIC" \
+            -v "$PWD/.rw-state:/app/data" \
+            --entrypoint python \
+            restaurant-watch - <<'PY'
+          import asyncio
+          import os
+          import httpx
+          import app.main as m
+
+          async def send_ntfy(text):
+              async with httpx.AsyncClient(timeout=15) as client:
+                  await client.post(
+                      f'https://ntfy.sh/{os.environ["NTFY_TOPIC"]}',
+                      content=text.encode("utf-8"),
+                      headers={
+                          "Title": "Restaurant Watch",
+                          "Priority": "high"
+                      }
+                  )
+              return True
+
+          m.send_telegram = send_ntfy
+
+          m.init_db()
+          m.seed_default_watches()
+
+          asyncio.run(m.run_all_checks())
+          PY
