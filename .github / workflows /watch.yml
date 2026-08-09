@@ -1,0 +1,68 @@
+name: Restaurant Watch
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "*/5 * * * *"
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Download program
+        uses: actions/checkout@v4
+
+      - name: Build monitor
+        run: docker build -t restaurant-watch .
+
+      - name: Check 大班樓 and 步雲
+        env:
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+        run: |
+          docker run --rm \
+            -e NTFY_TOPIC="$NTFY_TOPIC" \
+            restaurant-watch \
+            python - <<'PY'
+          import asyncio
+          import os
+          import httpx
+          from datetime import date
+          from app.main import RESTAURANTS, fetch_page_text, classify_visible_text
+
+          async def main():
+              start = date(2026, 8, 10)
+              end = date(2026, 12, 31)
+
+              for key, restaurant in RESTAURANTS.items():
+                  text = await fetch_page_text(restaurant["booking_url"])
+                  status, reason = classify_visible_text(text, start, end)
+
+                  print(restaurant["name"], status, reason)
+
+                  if status == "AVAILABLE" and os.getenv("NTFY_TOPIC"):
+                      message = (
+                          f'{restaurant["name"]} 可能有釋位！\n'
+                          '日期：2026/8/10～12/31\n'
+                          '人數：2位\n'
+                          '午餐、晚餐皆可\n'
+                          f'{restaurant["booking_url"]}'
+                      )
+
+                      async with httpx.AsyncClient(timeout=15) as client:
+                          await client.post(
+                              f'https://ntfy.sh/{os.environ["NTFY_TOPIC"]}',
+                              content=message.encode("utf-8"),
+                              headers={
+                                  "Title": "Restaurant Watch",
+                                  "Priority": "high",
+                                  "Tags": "bell"
+                              }
+                          )
+
+          asyncio.run(main())
+          PY
