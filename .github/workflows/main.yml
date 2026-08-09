@@ -1,33 +1,69 @@
-name: Restaurant Watch Diagnostic
+name: Restaurant Watch
 
 on:
   workflow_dispatch:
+  schedule:
+    - cron: "*/5 * * * *"
 
 jobs:
-  inspect:
+  check:
     runs-on: ubuntu-latest
     timeout-minutes: 10
 
     steps:
       - uses: actions/checkout@v4
 
+      - name: Restore last status
+        uses: actions/cache/restore@v4
+        with:
+          path: .rw-state
+          key: rw-state-${{ github.run_id }}
+          restore-keys: |
+            rw-state-
+
+      - name: Prepare state
+        run: mkdir -p .rw-state
+
       - name: Build monitor
         run: docker build -t restaurant-watch .
 
-      - name: Inspect booking pages
+      - name: Check 大班樓
+        env:
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
         run: |
           docker run --rm -i \
+            -e NTFY_TOPIC="$NTFY_TOPIC" \
+            -v "$PWD/.rw-state:/app/state" \
             --entrypoint python \
             restaurant-watch - <<'PY'
+
           import asyncio
+          import hashlib
+          import os
+          from pathlib import Path
+          import httpx
           from playwright.async_api import async_playwright
 
-          sites = {
-              "大班樓": "https://www.thechairmangroup.com/index.php?route=catering/booking",
-              "步雲": "https://inline.app/booking/-Oj5Aw_69P4V6xr3F77M%3Ainline-live-4/-Oj5AwexaWtzyzJE5VoG?language=zh-hk",
-          }
+          URL = "https://www.thechairmangroup.com/index.php?route=catering/booking"
+          STATE = Path("/app/state/chairman.txt")
 
-          async def inspect(name, url):
+          async def notify(message):
+              topic = os.environ.get("NTFY_TOPIC")
+              if not topic:
+                  raise RuntimeError("NTFY_TOPIC 沒有設定")
+
+              async with httpx.AsyncClient(timeout=15) as client:
+                  r = await client.post(
+                      f"https://ntfy.sh/{topic}",
+                      content=message.encode("utf-8"),
+                      headers={
+                          "Title": "大班樓 Restaurant Watch",
+                          "Priority": "high"
+                      }
+                  )
+                  r.raise_for_status()
+
+          async def main():
               async with async_playwright() as p:
                   browser = await p.chromium.launch(headless=True)
 
@@ -37,100 +73,100 @@ jobs:
                   )
 
                   try:
-                      print("\n")
-                      print("=" * 60)
-                      print(f"===== {name} =====")
-                      print("=" * 60)
-
                       await page.goto(
-                          url,
+                          URL,
                           wait_until="domcontentloaded",
                           timeout=45000
                       )
 
-                      await page.wait_for_timeout(8000)
+                      await page.wait_for_timeout(5000)
 
-                      print("FINAL URL:", page.url)
-                      print("TITLE:", await page.title())
-
-                      buttons = await page.locator("button").all_inner_texts()
-                      print("\nBUTTONS:")
-                      for x in buttons[:100]:
-                          if x.strip():
-                              print("BUTTON:", repr(x.strip()))
-
-                      inputs = page.locator("input")
-                      count = await inputs.count()
-
-                      print("\nINPUTS:", count)
-
-                      for i in range(min(count, 50)):
-                          x = inputs.nth(i)
-
-                          print(
-                              "INPUT",
-                              i,
-                              "type=", await x.get_attribute("type"),
-                              "name=", await x.get_attribute("name"),
-                              "value=", await x.get_attribute("value"),
-                              "placeholder=", await x.get_attribute("placeholder"),
-                              "aria=", await x.get_attribute("aria-label"),
-                          )
-
-                      selects = page.locator("select")
-                      select_count = await selects.count()
-
-                      print("\nSELECTS:", select_count)
-
-                      for i in range(select_count):
-                          s = selects.nth(i)
-
-                          print(
-                              "SELECT",
-                              i,
-                              "name=", await s.get_attribute("name"),
-                              "aria=", await s.get_attribute("aria-label"),
-                          )
-
-                          options = await s.locator("option").all_inner_texts()
-                          print("OPTIONS:", options)
-
-                      links = page.locator("a")
-                      link_count = await links.count()
-
-                      print("\nLINKS:")
-
-                      for i in range(min(link_count, 80)):
-                          a = links.nth(i)
-
-                          text = (await a.inner_text()).strip()
-                          href = await a.get_attribute("href")
-
-                          if text or href:
-                              print(
-                                  "LINK",
-                                  i,
-                                  repr(text),
-                                  repr(href)
-                              )
-
+                      title = await page.title()
                       body = await page.locator("body").inner_text()
-
-                      print("\nBODY BEGIN")
-                      print(body[:20000])
-                      print("BODY END")
-
-                  except Exception as e:
-                      print(f"\nERROR {name}:")
-                      print(type(e).__name__, str(e))
-                      raise
 
                   finally:
                       await browser.close()
 
-          async def main():
-              for name, url in sites.items():
-                  await inspect(name, url)
+              print("TITLE:", title)
+
+              low = body.lower()
+
+              if (
+                  "access to this page has been denied" in low
+                  or "確認您是人類" in body
+                  or "verify you are human" in low
+              ):
+                  raise RuntimeError("大班樓頁面被反機器人阻擋")
+
+              if "the chairman reservation" not in low:
+                  raise RuntimeError("沒有讀到大班樓 Reservation 頁面")
+
+              start = body.find("The Chairman Reservation")
+
+              if start < 0:
+                  start = 0
+
+              end = body.find("ADDRESS", start)
+
+              if end < 0:
+                  end = min(len(body), start + 7000)
+
+              booking_text = body[start:end]
+              normalized = " ".join(booking_text.split())
+
+              print("")
+              print("===== 大班樓目前訂位資訊 =====")
+              print(normalized[:4000])
+              print("================================")
+
+              current_hash = hashlib.sha256(
+                  normalized.encode("utf-8")
+              ).hexdigest()
+
+              previous_hash = ""
+
+              if STATE.exists():
+                  previous_hash = STATE.read_text().strip()
+
+              full_marker = (
+                  "fully booked until the end of december 2026"
+                  in normalized.lower()
+              )
+
+              if not previous_hash:
+                  print("第一次執行：建立基準")
+
+                  if not full_marker:
+                      await notify(
+                          "🚨 大班樓目前頁面已不是「2026年12月底前全滿」狀態。\n"
+                          "可能已有取消位／訂位狀態改變，請立即查看官方訂位頁。\n"
+                          + URL
+                      )
+
+              elif previous_hash != current_hash:
+                  print("⚠️ 大班樓訂位頁內容有變化")
+
+                  await notify(
+                      "🚨 大班樓訂位頁有變化！\n\n"
+                      "可能出現取消位，請立即查看。\n\n"
+                      "目前頁面資訊：\n"
+                      + normalized[:1200]
+                      + "\n\n"
+                      + URL
+                  )
+
+              else:
+                  print("沒有變化，目前維持原狀。")
+
+              STATE.write_text(current_hash)
 
           asyncio.run(main())
+
           PY
+
+      - name: Save current status
+        if: success()
+        uses: actions/cache/save@v4
+        with:
+          path: .rw-state
+          key: rw-state-${{ github.run_id }}
