@@ -1,0 +1,52 @@
+name: Inline API Test
+
+on:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Test 步雲 API
+        run: |
+          URL='https://inline.app/api/booking-capacitiesV3?companyId=-Oj5Aw_69P4V6xr3F77M%3Ainline-live-4&branchId=-Oj5AwexaWtzyzJE5VoG'
+
+          STATUS=$(curl -L -sS \
+            -A 'Mozilla/5.0' \
+            -H 'Accept: application/json, text/plain, */*' \
+            -H 'Referer: https://inline.app/' \
+            -H 'Origin: https://inline.app' \
+            -o response.json \
+            -w '%{http_code}' \
+            "$URL")
+
+          echo "HTTP STATUS: $STATUS"
+
+          if [ "$STATUS" != "200" ]; then
+            echo "步雲 API 無法從 GitHub 直接讀取"
+            head -c 2000 response.json
+            exit 1
+          fi
+
+          python - <<'PY'
+          import json
+
+          with open("response.json", "r", encoding="utf-8") as f:
+              data = json.load(f)
+
+          days = data.get("default", {})
+
+          print("✅ 步雲 API 成功讀取")
+          print("取得日期數量:", len(days))
+
+          for date, info in list(days.items())[:5]:
+              print(
+                  date,
+                  "status =", info.get("status"),
+                  "times =", list(info.get("times", {}).keys()),
+                  "min =", info.get("minBookingSize"),
+                  "max =", info.get("maxBookingSize"),
+              )
+          PY
