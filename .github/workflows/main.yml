@@ -72,21 +72,44 @@ jobs:
                       viewport={"width": 1280, "height": 900}
                   )
 
-                  try:
-                      await page.goto(
-                          URL,
-                          wait_until="domcontentloaded",
-                          timeout=45000
-                      )
+                         try:
+            loaded = False
 
-                      await page.wait_for_timeout(5000)
+            for attempt in range(1, 4):
+                try:
+                    print(f"開啟大班樓頁面，第 {attempt}/3 次")
 
-                      title = await page.title()
-                      body = await page.locator("body").inner_text()
+                    await page.goto(
+                        URL,
+                        wait_until="domcontentloaded",
+                        timeout=60000
+                    )
 
-                  finally:
-                      await browser.close()
+                    loaded = True
+                    break
 
+                except Exception as e:
+                    print(
+                        f"第 {attempt} 次開啟失敗："
+                        f"{type(e).__name__}: {e}"
+                    )
+
+                    if attempt < 3:
+                        print("10 秒後重新嘗試...")
+                        await page.wait_for_timeout(10000)
+
+            if not loaded:
+                print("大班樓網站連續 3 次無法開啟，本輪跳過。")
+                print("這不是程式故障，不讓 GitHub Actions 標記 Failure。")
+                return
+
+            await page.wait_for_timeout(5000)
+
+            title = await page.title()
+            body = await page.locator("body").inner_text()
+
+        finally:
+            await browser.close()
               print("TITLE:", title)
 
               low = body.lower()
